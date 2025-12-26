@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Elasticsearch daily log export at 1:00 AM
+
+[Timer]
+OnCalendar=*-*-* 01:00:00
+Persistent=true
+RandomizedDelaySec=5min
+Unit=logs_export.service
+
+[Install]
+WantedBy=timers.target

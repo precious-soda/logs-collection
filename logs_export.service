@@ -1,0 +1,19 @@
+[Unit]
+Description=Daily export of previous day's Elasticsearch logs to CSV
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash "/path/to/file/logs_export.sh"
+WorkingDirectory=/path/to/logs-collection
+User=user_name
+Group=user_name
+StandardOutput=journal
+StandardError=journal
+StandardInput=null
+TimeoutStartSec=600
+TimeoutStopSec=30
+MemoryMax=1G
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
