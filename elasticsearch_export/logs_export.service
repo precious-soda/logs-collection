@@ -1,0 +1,21 @@
+[Unit]
+Description=Daily export of previous day's Elasticsearch logs to CSV
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart="/path/to/python_virtual_environment" \
+          "/path/to/elasticsearch_export/logs_export.py"
+User=user_name
+Group=user_name
+StandardOutput=journal
+StandardError=journal
+StandardInput=null
+TimeoutStartSec=600
+TimeoutStopSec=30
+MemoryMax=1G
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

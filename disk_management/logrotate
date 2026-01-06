@@ -1,0 +1,13 @@
+/path/to/log_file/disk_monitor.log {
+    daily
+    rotate 15
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 user_name user_name
+    copytruncate
+
+    # Rotate if larger than 5MB or older than 1 day
+    size 5M
+}
