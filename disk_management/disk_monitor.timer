@@ -1,9 +1,9 @@
 [Unit]
-Description=Run disk monitor daily at 10:00 AM
+Description=Run disk monitor daily at 03:30 AM
 
 [Timer]
-OnBootSec=45min
-OnCalendar=*-*-* 10:00:00
+OnBootSec=55min
+OnCalendar=*-*-* 03:30:00
 RandomizedDelaySec=5min
 Persistent=true
 Unit=disk_monitor.service

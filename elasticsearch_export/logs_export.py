@@ -7,20 +7,18 @@ import requests
 import os
 from dotenv import load_dotenv
 
-# --- LOAD ENVIRONMENT VARIABLES ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(BASE_DIR, "..", ".env")
 load_dotenv(dotenv_path=ENV_PATH)
 OUTPUT_DIR = os.getenv("OUTPUT_DIR")
 DISCORD_WEBHOOK = os.getenv("DISCORD")
 
-# --- CONFIGURATION ---
 ES_HOST = "http://localhost:9200"
 INDEX = "oai-*"
 BATCH_SIZE = 1000
 LOCAL_TZ = pytz.timezone("Asia/Kolkata")
+QUEUE_FILE = os.path.join(BASE_DIR, "queue.txt")
 
-# --- FILE SIZE FORMATTER ---
 def format_file_size(bytes_size: int) -> str:
     for unit in ["B", "KB", "MB", "GB", "TB"]:
         if bytes_size < 1024:
@@ -28,22 +26,6 @@ def format_file_size(bytes_size: int) -> str:
         bytes_size /= 1024
     return f"{bytes_size:.2f} PB"
 
-# --- CALCULATE PREVIOUS DAY IN LOCAL TIMEZONE ---
-now_local = datetime.now(LOCAL_TZ)
-yesterday_local = now_local - timedelta(days=1)
-PREV_DATE = yesterday_local.strftime("%Y-%m-%d")
-
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-OUTPUT_FILE = os.path.join(OUTPUT_DIR, f"logs_{PREV_DATE}.csv")
-
-start_local = yesterday_local.replace(hour=0, minute=0, second=0, microsecond=0)
-end_local = yesterday_local.replace(hour=23, minute=59, second=59, microsecond=999999)
-
-# Convert to UTC for Elasticsearch
-start_utc = start_local.astimezone(pytz.utc).isoformat()
-end_utc = end_local.astimezone(pytz.utc).isoformat()
-
-# --- DISCORD ALERT FUNCTION ---
 def send_discord_alert(message: str, color: int = 3447003):
     if not DISCORD_WEBHOOK:
         print("DISCORD webhook not set. Cannot send alert.")
@@ -51,7 +33,7 @@ def send_discord_alert(message: str, color: int = 3447003):
 
     payload = {
         "embeds": [{
-            "title": "Logs Export",
+            "title": "Elasticsearch Export",
             "description": message,
             "color": color,
         }]
@@ -63,112 +45,185 @@ def send_discord_alert(message: str, color: int = 3447003):
     except Exception as e:
         print(f"Failed to send Discord alert: {e}")
 
-# --- CONNECT TO ELASTICSEARCH ---
-try:
-    es = Elasticsearch(ES_HOST)
-    if not es.ping():
-        raise ConnectionError("Elasticsearch not reachable")
-except (ConnectionError, TransportError, Exception):
-    send_discord_alert(
-        f"🚨 **CRITICAL: Elasticsearch Unreachable**\n"
-        f"Host: {ES_HOST}\n"
-        f"Date attempted: {PREV_DATE}\n"
-        f"Export **FAILED**",
-        color=16711680
-    )
-    exit(1)
+def add_date_to_queue(date_str: str):
+    existing_dates = read_queue()
+    if date_str not in existing_dates:
+        with open(QUEUE_FILE, "a") as f:
+            f.write(f"{date_str}\n")
+        print(f"Added {date_str} to queue")
 
-# --- OPEN PIT ---
-pit_response = es.open_point_in_time(index=INDEX, keep_alive="2m")
-pit_id = pit_response["id"]
+def read_queue() -> list:
+    if not os.path.exists(QUEUE_FILE):
+        return []
+    with open(QUEUE_FILE, "r") as f:
+        return [line.strip() for line in f if line.strip()]
 
-all_logs = []
-search_after = None
+def remove_date_from_queue(date_str: str):
+    dates = read_queue()
+    dates = [d for d in dates if d != date_str]
+    with open(QUEUE_FILE, "w") as f:
+        for d in dates:
+            f.write(f"{d}\n")
+    print(f"Removed {date_str} from queue")
 
-FIELDS = [
-    "@log_name",
-    "@timestamp",
-    "_id",
-    "_index",
-    "container_id",
-    "container_name",
-    "log",
-    "source"
-]
+def count_queue() -> int:
+    return len(read_queue())
 
-# --- FETCH LOGS ---
-while True:
-    body = {
-        "size": BATCH_SIZE,
-        "sort": [{"@timestamp": "asc"}],
-        "pit": {"id": pit_id, "keep_alive": "2m"},
-        "_source": True,
-        "query": {
-            "range": {
-                "@timestamp": {
-                    "gte": start_utc,
-                    "lte": end_utc
+def export_logs_for_date(es: Elasticsearch, date_str: str) -> tuple:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_file = os.path.join(OUTPUT_DIR, f"logs_{date_str}.csv")
+
+    date_local = datetime.strptime(date_str, "%Y-%m-%d")
+    date_local = LOCAL_TZ.localize(date_local)
+
+    start_local = date_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_local = date_local.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+    start_utc = start_local.astimezone(pytz.utc).isoformat()
+    end_utc = end_local.astimezone(pytz.utc).isoformat()
+
+    try:
+        pit_response = es.open_point_in_time(index=INDEX, keep_alive="2m")
+        pit_id = pit_response["id"]
+    except Exception as e:
+        print(f"Failed to open PIT for {date_str}: {e}")
+        return 0, 0, False
+
+    all_logs = []
+    search_after = None
+
+    FIELDS = [
+        "@log_name",
+        "@timestamp",
+        "_id",
+        "_index",
+        "container_id",
+        "container_name",
+        "log",
+        "source"
+    ]
+
+    try:
+        while True:
+            body = {
+                "size": BATCH_SIZE,
+                "sort": [{"@timestamp": "asc"}],
+                "pit": {"id": pit_id, "keep_alive": "2m"},
+                "_source": True,
+                "query": {
+                    "range": {
+                        "@timestamp": {
+                            "gte": start_utc,
+                            "lte": end_utc
+                        }
+                    }
                 }
             }
-        }
-    }
 
-    if search_after:
-        body["search_after"] = search_after
+            if search_after:
+                body["search_after"] = search_after
 
-    resp = es.search(body=body)
-    hits = resp["hits"]["hits"]
+            resp = es.search(body=body)
+            hits = resp["hits"]["hits"]
 
-    if not hits:
-        break
+            if not hits:
+                break
 
-    for doc in hits:
-        source = doc.get("_source", {})
+            for doc in hits:
+                source = doc.get("_source", {})
+                ts = source.get("@timestamp")
+                if ts:
+                    try:
+                        dt_utc = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+                        dt_utc = pytz.utc.localize(dt_utc)
+                        dt_local = dt_utc.astimezone(LOCAL_TZ)
+                        source["@timestamp"] = dt_local.strftime("%b %-d, %Y @ %H:%M:%S.000")
+                    except Exception:
+                        pass
 
-        # --- TIMEZONE-AWARE TIMESTAMP ---
-        ts = source.get("@timestamp")
-        if ts:
-            try:
-                dt_utc = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
-                dt_utc = pytz.utc.localize(dt_utc)
-                dt_local = dt_utc.astimezone(LOCAL_TZ)
-                source["@timestamp"] = dt_local.strftime("%b %-d, %Y @ %H:%M:%S.000")
-            except Exception:
-                pass
+                source["_id"] = doc.get("_id", "")
+                source["_index"] = doc.get("_index", "")
+                filtered_source = {field: source.get(field, "") for field in FIELDS}
+                all_logs.append(filtered_source)
 
-        # --- ADD ES METADATA ---
-        source["_id"] = doc.get("_id", "")
-        source["_index"] = doc.get("_index", "")
+            search_after = hits[-1]["sort"]
 
-        filtered_source = {field: source.get(field, "") for field in FIELDS}
-        all_logs.append(filtered_source)
+        es.close_point_in_time(body={"id": pit_id})
 
-    search_after = hits[-1]["sort"]
+    except Exception as e:
+        print(f"Error fetching logs for {date_str}: {e}")
+        try:
+            es.close_point_in_time(body={"id": pit_id})
+        except:
+            pass
+        return 0, 0, False
 
-# --- CLOSE PIT ---
-es.close_point_in_time(body={"id": pit_id})
+    if not all_logs:
+        return 0, 0, True
 
-# --- EXPORT CSV ---
-if not all_logs:
-    send_discord_alert(
-        f"ℹ️ **INFO: No Logs Found**\nDate: {PREV_DATE}",
-        color=3447003
-    )
-else:
     df = pd.DataFrame(all_logs)
     df = df[FIELDS]
-    df.to_csv(OUTPUT_FILE, index=False)
+    df.to_csv(output_file, index=False)
 
-    file_size = format_file_size(os.path.getsize(OUTPUT_FILE))
-    total_hits = len(df)
+    return len(df), os.path.getsize(output_file), True
 
-    send_discord_alert(
-        f"✅ **SUCCESS: Export Completed**\n"
-        f"Date: {PREV_DATE}\n"
-        f"Total logs: {total_hits}\n"
-        f"File: `{os.path.basename(OUTPUT_FILE)}`\n"
-        f"Size: **{file_size}**",
-        color=65280
-    )
+def main():
+    now_local = datetime.now(LOCAL_TZ)
+    yesterday_local = now_local - timedelta(days=1)
+    prev_date = yesterday_local.strftime("%Y-%m-%d")
+    add_date_to_queue(prev_date)
 
-print(f"Export completed for {PREV_DATE}. Total logs: {len(all_logs)}")
+    try:
+        es = Elasticsearch(ES_HOST)
+        if not es.ping():
+            raise ConnectionError("Elasticsearch not reachable")
+    except (ConnectionError, TransportError, Exception):
+        send_discord_alert(
+            f"CRITICAL: ES Down\nCount dates in queue: {count_queue()}",
+            color=16711680
+        )
+        exit(1)
+
+    present = {"dates": [], "total_logs": 0, "total_size": 0}
+    absent = {"dates": []}
+
+    while count_queue() > 0:
+        date_str = read_queue()[0]
+        print(f"Processing {date_str}...")
+
+        total_logs, file_size, success = export_logs_for_date(es, date_str)
+
+        if not success:
+            print(f"Failed to process {date_str}. Keeping in queue.")
+            break
+
+        if total_logs > 0:
+            present["dates"].append(date_str)
+            present["total_logs"] += total_logs
+            present["total_size"] += file_size
+        else:
+            absent["dates"].append(date_str)
+
+        remove_date_from_queue(date_str)
+
+    if count_queue() == 0:
+        if present["dates"]:
+            send_discord_alert(
+                "Success: Logs Export Compeleted\n"
+                f"Dates:\n" + "\n".join(present["dates"]) + "\n\n"
+                f"Logs: {present['total_logs']}\n"
+                f"Size: {format_file_size(present['total_size'])}",
+                color=65280
+            )
+
+        if absent["dates"]:
+            send_discord_alert(
+                "Info: No logs\n"
+                f"Dates:\n" + "\n".join(absent["dates"]),
+                color=3447003
+            )
+
+    print("Export process completed.")
+
+if __name__ == "__main__":
+    main()

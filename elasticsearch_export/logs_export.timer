@@ -2,7 +2,7 @@
 Description=Run Elasticsearch daily log export at 1:00 AM
 
 [Timer]
-OnBootSec=10min
+OnBootSec=30min
 OnCalendar=*-*-* 01:00:00
 Persistent=true
 RandomizedDelaySec=5min
