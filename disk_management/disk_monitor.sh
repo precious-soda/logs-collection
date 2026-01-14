@@ -12,10 +12,8 @@ set -a
 source "$ENV_FILE"
 set +a
 
-
 THRESHOLD=80
-CHECK_PATHS=( "/mnt/c" )
-ALERT_STATE_FILE="/tmp/disk_alert_last"
+CHECK_PATHS=( "/" ) # Paths to be monitored
 MONTHLY_BATCH_SIZE=30
 FILE_AGE_SAFETY_HOURS=2
 MIN_EMERGENCY_SIZE_MB=400
@@ -90,10 +88,7 @@ compress_batch() {
   tar -C "$OUTPUT_DIR" -cf - -T <(basename -a "${files[@]}") | \
     zstd -$ZSTD_LEVEL -T0 -o "$archive"
 
-  if ! zstd -t "$archive" >/dev/null 2>&1; then
-    rm -f "$archive"
-    return 1
-  fi
+  zstd -t "$archive" >/dev/null 2>&1 || { rm -f "$archive"; return 1; }
 
   size_after=$(du -sb "$archive" | awk '{print $1}')
   rm -f "${files[@]}"
@@ -120,15 +115,10 @@ check_monthly_batch() {
       "✅ Success: Monthly Compression" \
       "From: $COMPRESS_FROM\nTo: $COMPRESS_TO\nSize: $((SIZE_BEFORE/1024/1024))MB → $((SIZE_AFTER/1024/1024))MB\nDisk Usage: $usage" \
       65280
-    exit 0
-  else
-    usage=$(df -h "$OUTPUT_DIR" | awk 'NR==2{print $5}')
-    send_discord_alert \
-      "❌ Error: Monthly Compression Unsuccessful" \
-      "Disk Usage: $usage" \
-      16711680
-    exit 1
+    return 0
   fi
+
+  return 1
 }
 
 emergency_compress() {
@@ -143,42 +133,42 @@ emergency_compress() {
   [ "$total_mb" -lt "$MIN_EMERGENCY_SIZE_MB" ] && return 1
 
   if compress_batch "emergency" "${files[@]}"; then
+    usage=$(df -h "$OUTPUT_DIR" | awk 'NR==2{print $5}')
     send_discord_alert \
       "⚠️ Warning: Emergency Compression" \
-      "From: $COMPRESS_FROM\nTo: $COMPRESS_TO\nSize: $((SIZE_BEFORE/1024/1024))MB → $((SIZE_AFTER/1024/1024))MB" \
+      "From: $COMPRESS_FROM\nTo: $COMPRESS_TO\nSize: $((SIZE_BEFORE/1024/1024))MB → $((SIZE_AFTER/1024/1024))MB\nDisk Usage: $usage" \
       16753920
     return 0
-  else
-    send_discord_alert \
-      "❌ Error: Emergency Compression Unsuccessful" \
-      "Compression failed during critical disk usage" \
-      16711680
-    return 1
   fi
+
+  return 1
 }
 
-check_disk() {
+is_disk_critical() {
   local path="$1"
   usage=$(df -h "$path" | awk 'NR==2{print $5}' | tr -d '%')
-
-  [ -z "$usage" ] && return
-
-  if [ "$usage" -ge "$THRESHOLD" ]; then
-    send_discord_alert \
-      "🚨 Critical: Disk Space Low" \
-      "Path: $path\nDisk Usage: ${usage}%" \
-      16711680
-
-    emergency_compress
-    date +%s > "$ALERT_STATE_FILE"
-    exit 0
-  else
-    echo "$(date): Disk usage at ${usage}%" >> "$LOG_FILE"
-  fi
+  [ "$usage" -ge "$THRESHOLD" ]
 }
 
-check_monthly_batch
+if check_monthly_batch; then
+  echo "$(date): Monthly compression completed" >> "$LOG_FILE"
 
-for path in "${CHECK_PATHS[@]}"; do
-  [ -d "$path" ] && check_disk "$path"
-done
+elif is_disk_critical "${CHECK_PATHS[0]}"; then
+  usage=$(df -h "${CHECK_PATHS[0]}" | awk 'NR==2{print $5}')
+  
+  if emergency_compress; then
+    echo "$(date): Emergency compression completed" >> "$LOG_FILE"
+  else
+    send_discord_alert \
+      "🚨 Critical: Disk Space" \
+      "Disk Usage: $usage\nEmergency compression not possible" \
+      16711680
+    echo "$(date): Critical disk usage ${usage}, emergency compression not possible" >> "$LOG_FILE"
+  fi
+
+else
+  usage=$(df -h "${CHECK_PATHS[0]}" | awk 'NR==2{print $5}')
+  echo "$(date): Disk usage ${usage}" >> "$LOG_FILE"
+fi
+
+exit 0
