@@ -21,16 +21,39 @@ cd logs-collection
 docker compose up -d
 ```
 
-## 📝 How to Configure Your Services for Log Collection
+## 📝 How to Configure Log Collection
 
-You need to configure your Docker services to send logs to Fluentd using the Fluentd logging driver also use unique tags for each service.
+Choose the appropriate method based on your deployment type:
+
+### 🐳 Docker Deployments
+
+Configure your Docker services to send logs to Fluentd using the Fluentd logging driver. Make sure to use unique tags for each Docker service.
 
 ```bash
 logging:
   driver: "fluentd"
   options:
-    fluentd-address: localhost:24224
+    fluentd-address: 10.33.42.15:24224
     tag: du
+```
+
+### 🖥️ Bare Metal Deployments
+
+When running services directly on bare metal, use the following command pattern to collect and forward logs.
+
+```bash
+sudo apt update
+sudo apt install -y ruby ruby-dev
+sudo gem install fluentd
+
+sudo filename 2>&1 \
+| tee >(
+  while read -r line; do
+    jq -nc --arg log "$line" \
+      '{"log":$log,"container_id":"-","container_name":"-","source":"stdout"}'
+  done \
+  | fluent-cat -h 10.33.42.15 -p 24224 du
+)
 ```
 
 ## 📊 Viewing Logs
@@ -61,8 +84,8 @@ This setup uses Elasticsearch ILM to automatically manage log retention and opti
 
 This guide walks you through setting up a pipeline to export Elasticsearch logs to CSV files daily, monitor disk usage and compress older CSV files using tar + zstd.
 
-
 ### Set Up CSV Export
+
 #### 1. Create the service
 
 ```bash
@@ -112,17 +135,20 @@ sudo systemctl start logs_export.service
 ### Set Up Disk Monitoring and Compressed Archiving
 
 #### 1. Create the service
+
 ```bash
 # Update disk_management/disk_monitor.service file
 sudo vim /etc/systemd/system/disk_monitor.service
 ```
 
 #### 2. Create the timer
+
 ```bash
 sudo vim /etc/systemd/system/disk_monitor.timer
 ```
 
 #### 2. Enable and start services
+
 ```bash
 # Reload systemd to recognize new services
 sudo systemctl daemon-reload
@@ -133,6 +159,7 @@ sudo systemctl start disk_monitor.timer
 ```
 
 #### 4. Check status
+
 ```bash
 # Check disk_monitor service status
 systemctl status disk-monitor.service
@@ -151,6 +178,7 @@ sudo tail -f /path/to/disk_monitor.log
 ```
 
 #### 5. Manually test the service (recommended before relying on timer)
+
 ```bash
 sudo systemctl start disk_monitor.service
 ```
@@ -158,12 +186,14 @@ sudo systemctl start disk_monitor.service
 ### Set Up Log Rotation
 
 #### 1. Create logrotate configuration
+
 ```bash
 # Use the logrotate file
 sudo vim /etc/logrotate.d/disk_monitor
 ```
 
 ### 2. Test
+
 ```bash
 sudo logrotate -f /etc/logrotate.d/disk_monitor
 ```
