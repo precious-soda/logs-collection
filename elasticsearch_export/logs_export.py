@@ -111,12 +111,30 @@ def export_logs_for_date(es: Elasticsearch, date_str: str) -> tuple:
                 "pit": {"id": pit_id, "keep_alive": "2m"},
                 "_source": True,
                 "query": {
-                    "range": {
-                        "@timestamp": {
-                            "gte": start_utc,
-                            "lte": end_utc
+                    "must": [
+                        {
+                            "range": {
+                                "@timestamp": {
+                                    "gte": start_utc,
+                                    "lte": end_utc
+                                }
+                            }
                         }
-                    }
+                    ],
+                    "must_not": [
+                        {
+                            "term": {
+                                "log.keyword": ""
+                            }
+                        }
+                    ],
+                    "filter": [
+                        {
+                            "exists": {
+                                "field": "log"
+                            }
+                        }
+                    ]
                 }
             }
 
@@ -134,10 +152,17 @@ def export_logs_for_date(es: Elasticsearch, date_str: str) -> tuple:
                 ts = source.get("@timestamp")
                 if ts:
                     try:
-                        dt_utc = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+                        # Parse the full timestamp including milliseconds
+                        if '.' in ts:
+                            dt_utc = datetime.strptime(ts[:23], "%Y-%m-%dT%H:%M:%S.%f")
+                        else:
+                            dt_utc = datetime.strptime(ts[:19], "%Y-%m-%dT%H:%M:%S")
+                        
                         dt_utc = pytz.utc.localize(dt_utc)
                         dt_local = dt_utc.astimezone(LOCAL_TZ)
-                        source["@timestamp"] = dt_local.strftime("%b %-d, %Y @ %H:%M:%S.000")
+                        
+                        # Format with actual milliseconds
+                        source["@timestamp"] = dt_local.strftime("%b %-d, %Y @ %H:%M:%S.%f")[:-3]
                     except Exception:
                         pass
 
@@ -163,6 +188,15 @@ def export_logs_for_date(es: Elasticsearch, date_str: str) -> tuple:
 
     df = pd.DataFrame(all_logs)
     df = df[FIELDS]
+
+    # Rename columns for CSV output
+    df = df.rename(columns={
+        "@log_name": "log_name",
+        "@timestamp": "timestamp",
+        "_id": "id",
+        "_index": "index"
+    })
+
     df.to_csv(output_file, index=False)
 
     return len(df), os.path.getsize(output_file), True
