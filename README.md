@@ -1,199 +1,134 @@
-# Logs Collection System
+# Logs Collection
 
-This system collects logs using Fluentd, stores them in Elasticsearch, automatically exports them to CSV files daily and manages index lifecycle to prevent storage overflow.
+This is a log management system that collects logs via Fluentd, stores them in Elasticsearch, and automatically exports them to CSV files daily with index lifecycle management to prevent storage overflow. It also monitors and reports disk space usage and performs monthly compression for easy transfer.
+
+## 🏗️ Architecture
+
+This system has two components:
+
+1. **Log Collection Server** - Runs Fluentd + Elasticsearch (Docker) + Export/Monitoring services (systemd)
+2. **Application Servers** - Your services that send logs to the collection server
 
 ## 🔧 Prerequisites
 
-- Docker
-- docker-compose
+### On Log Collection Server
+- Docker & docker-compose
+- Python 3.x with uv (or pip)
 - zstd
-- uv
+- Python packages: `pytz pandas python-dotenv elasticsearch==8.17`
 
-## ⚠️ Important Configuration Note
-
-Before running the system make sure to update all paths in the `.env` files to match your environment and directory structure.
+### On Application Servers
+- Docker (for Docker deployments) OR
+- Ruby + Fluentd (for bare metal deployments)
 
 ## 🚀 Setup
 
+### Step 1: Setup Log Collection Server
 ```bash
 git clone https://github.com/precious-soda/logs-collection
 cd logs-collection
+
+# Update .env files with your paths
+vim .env
+
+# Start Fluentd and Elasticsearch
 docker compose up -d
 ```
 
-## 📝 How to Configure Log Collection
+### Step 2: Configure Index Lifecycle Management
 
-Choose the appropriate method based on your deployment type:
+1. Open Kibana on localhost:5601 and click on ☰
+2. Search Management and select Dev Tools
+3. On the right, clear the boilerplate in the shell
+4. Copy and paste the ilm_policy
+5. Select each policy and click ▶️
+6. Verify acknowledgement is displayed
 
-### 🐳 Docker Deployments
+### Step 3: Setup Automated Export
 
-Configure your Docker services to send logs to Fluentd using the Fluentd logging driver. Make sure to use unique tags for each Docker service.
-
+#### Create and enable CSV export service
 ```bash
+# Update paths in the service file
+sudo cp elasticsearch_export/logs_export.service /etc/systemd/system/
+sudo cp elasticsearch_export/logs_export.timer /etc/systemd/system/
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable logs_export.timer
+sudo systemctl start logs_export.timer
+
+# Verify
+systemctl status logs_export.service
+systemctl list-timers | grep logs_export
+
+# Test (recommended before relying on timer)
+sudo systemctl start logs_export.service
+```
+
+#### Create and enable disk monitoring service
+```bash
+# Update paths in the service file
+sudo cp disk_management/disk_monitor.service /etc/systemd/system/
+sudo cp disk_management/disk_monitor.timer /etc/systemd/system/
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable disk_monitor.timer
+sudo systemctl start disk_monitor.timer
+
+# Verify
+systemctl status disk_monitor.service
+systemctl list-timers | grep disk_monitor
+
+# Test (recommended before relying on timer)
+sudo systemctl start disk_monitor.service
+```
+
+#### Setup log rotation
+```bash
+sudo vim /etc/logrotate.d/disk_monitor
+sudo logrotate -f /etc/logrotate.d/disk_monitor  # Test
+```
+
+### Step 4: Configure Application Servers to Send Logs
+
+Now configure your application servers to forward logs to the collection server.
+
+#### For Docker Deployments
+
+Add to your docker-compose.yml:
+```yaml
 logging:
   driver: "fluentd"
   options:
-    fluentd-address: 10.33.42.15:24224
-    tag: du
+    fluentd-address: 10.33.42.15:24224  # Your log collection server IP
+    tag: your-service-name
 ```
 
-### 🖥️ Bare Metal Deployments
-
-When running services directly on bare metal, use the following command pattern to collect and forward logs.
-
+#### For Bare Metal Deployments
 ```bash
+# Install Fluentd
 sudo apt update
 sudo apt install -y ruby ruby-dev
 sudo gem install fluentd
 
-sudo filename 2>&1 \
+# Run your service with log forwarding
+sudo your-command 2>&1 \
 | tee >(
   while read -r line; do
     jq -nc --arg log "$line" \
       '{"log":$log,"container_id":"-","container_name":"-","source":"stdout"}'
   done \
-  | fluent-cat -h 10.33.42.15 -p 24224 du
+  | fluent-cat -h 10.33.42.15 -p 24224 your-service-name
 )
 ```
 
+**Important:** Replace `10.33.42.15` with your actual log collection server IP address.
+
 ## 📊 Viewing Logs
 
-Once configured, your logs will be available:
+Your logs will be available:
 
-- Real-time: In Fluentd container stdout
-- Stored: In Elasticsearch with index pattern
-
-## 🗂️ Index Lifecycle Management (ILM)
-
-This setup uses Elasticsearch ILM to automatically manage log retention and optimize storage:
-
-- Rolls over indices when they reach a certain size or age.
-- Deletes old indices after a retention period.
-- Optimizes storage by moving older data to different tiers.
-
-### Setting up ILM in Kibana
-
-1. Open Kibana and click on ☰.
-2. Search Management and select Dev Tools.
-3. On the right clear the Boilerplate in the shell.
-4. Copy and paste the ilm_policy.
-5. Then select each of them and click on ▶️ button.
-6. An acknowledgement will be displayed on the right.
-
-## ➰ Automated Log Export and Compressed Archiving
-
-This guide walks you through setting up a pipeline to export Elasticsearch logs to CSV files daily, monitor disk usage and compress older CSV files using tar + zstd.
-
-### Set Up CSV Export
-
-#### 1. Create the service
-
-```bash
-# Update the logs_export.service file
-sudo vim /etc/systemd/system/logs_export.service
-```
-
-#### 2. Create the timer
-
-```bash
-sudo vim /etc/systemd/system/logs_export.timer
-```
-
-#### 3. Enable and start services
-
-```bash
-# Reload systemd to recognize new services
-sudo systemctl daemon-reload
-
-# Enable and start logs exporter
-sudo systemctl enable logs_export.timer
-sudo systemctl start logs_export.timer
-```
-
-#### 4. Check Status
-
-```bash
-# Check logs_export service status
-systemctl status logs_export.service
-
-# check if timer is active
-systemctl list-timers | grep logs_export
-
-# check next run time
-systemctl list-timers --all
-
-# view logs of the last run
-journalctl -u logs_export.service -e
-```
-
-#### 5. Manually test the service (recommended before relying on timer)
-
-```bash
-sudo systemctl start logs_export.service
-```
-
-### Set Up Disk Monitoring and Compressed Archiving
-
-#### 1. Create the service
-
-```bash
-# Update disk_management/disk_monitor.service file
-sudo vim /etc/systemd/system/disk_monitor.service
-```
-
-#### 2. Create the timer
-
-```bash
-sudo vim /etc/systemd/system/disk_monitor.timer
-```
-
-#### 2. Enable and start services
-
-```bash
-# Reload systemd to recognize new services
-sudo systemctl daemon-reload
-
-# Enable and start disk monitor
-sudo systemctl enable disk_monitor.timer
-sudo systemctl start disk_monitor.timer
-```
-
-#### 4. Check status
-
-```bash
-# Check disk_monitor service status
-systemctl status disk-monitor.service
-
-# check if timer is active
-systemctl list-timers | grep disk_monitor
-
-# check next run time
-systemctl list-timers --all
-
-# view logs of the last run
-journalctl -u disk-monitor.service -e
-
-# Detailed disk monitor log file
-sudo tail -f /path/to/disk_monitor.log
-```
-
-#### 5. Manually test the service (recommended before relying on timer)
-
-```bash
-sudo systemctl start disk_monitor.service
-```
-
-### Set Up Log Rotation
-
-#### 1. Create logrotate configuration
-
-```bash
-# Use the logrotate file
-sudo vim /etc/logrotate.d/disk_monitor
-```
-
-### 2. Test
-
-```bash
-sudo logrotate -f /etc/logrotate.d/disk_monitor
-```
+- **Real-time:** Fluentd container stdout
+- **Historical:** Elasticsearch/Kibana with index pattern `oai-*`
+- **Exported:** CSV files in your configured OUTPUT_DIR

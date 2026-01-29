@@ -250,12 +250,12 @@ def main():
                 color=65280
             )
 
-        if absent["dates"]:
-            send_discord_alert(
-                "Info: No logs\n"
-                f"Dates:\n" + "\n".join(absent["dates"]),
-                color=3447003
-            )
+        # if absent["dates"]:
+        #     send_discord_alert(
+        #         "Info: No logs\n"
+        #         f"Dates:\n" + "\n".join(absent["dates"]),
+        #         color=3447003
+        #     )
 
     print("Export process completed.")
 
